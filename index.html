@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LED Flow 8 - Bluetooth Edition</title>
+  <style>
+    :root {
+      --bg-1: #f6f4ea; --bg-2: #dcefe8; --ink: #1f2a30; --card: #fffef8;
+      --line: #7fa593; --accent: #d05e2a; --ok: #2d8a57; --err: #b23b31;
+      --shadow: 0 12px 30px rgba(29, 63, 63, 0.14); --radius: 14px; --grid: rgba(80, 122, 108, 0.16);
+    }
+    * { box-sizing: border-box; }
+    .chip { font-size: 0.8rem; background: #fff; padding: 4px 8px; border-radius: 5px; border: 1px solid #0001; }
+    body {
+      margin: 0; font-family: sans-serif; color: var(--ink);
+      background: linear-gradient(130deg, var(--bg-1), var(--bg-2)); min-height: 100vh; padding: 14px;
+    }
+    .shell {
+      max-width: 1300px; margin: 0 auto; background: rgba(255, 255, 255, 0.65);
+      border-radius: 18px; box-shadow: var(--shadow); overflow: hidden;
+    }
+    .topbar { padding: 14px; display: flex; justify-content: space-between; background: #fff5; border-bottom: 1px solid #0002; }
+    .toolbar { padding: 10px; display: flex; gap: 8px; flex-wrap: wrap; background: #fff8; }
+    button { border: none; border-radius: 8px; padding: 8px 12px; font-weight: 700; cursor: pointer; background: #e8f1eb; }
+    button.primary { background: #e48c55; color: white; }
+    button.good { background: #4dad7f; color: white; }
+    button.warn { background: #da7b5d; color: white; }
+    .workspace {
+      position: relative; height: 70vh; overflow: hidden; background-size: 24px 24px;
+      background-image: linear-gradient(90deg, var(--grid) 1px, transparent 1px), linear-gradient(var(--grid) 1px, transparent 1px);
+    }
+    #links { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+    .linkPath { fill: none; stroke: var(--line); stroke-width: 3; stroke-dasharray: 5 5; animation: dash 1s linear infinite; }
+    @keyframes dash { to { stroke-dashoffset: -20; } }
+    .node {
+      position: absolute; width: 200px; background: var(--card); border-radius: var(--radius);
+      border: 2px solid #5f857488; padding: 8px; box-shadow: 0 4px 10px #0001;
+      transition: border-color 0.2s, box-shadow 0.2s, transform 0.2s;
+    }
+    .node.start { border-color: var(--accent); }
+    .node.active { border-color: #4dad7f; box-shadow: 0 0 15px #4dad7f; transform: scale(1.03); border-width: 3px; z-index: 10; }
+    .nodeHead { cursor: grab; background: #eee; padding: 5px; margin-bottom: 5px; display: flex; justify-content: space-between; }
+    .ports { display: flex; justify-content: space-between; margin: 10px 0; }
+    .port { width: 40px; height: 25px; border-radius: 5px; border: none; font-size: 0.7rem; }
+    .port.in { background: #d9eee8; } .port.out { background: #fae2d0; }
+    .port.out.armed { outline: 2px solid var(--accent); }
+    .field { display: block; font-size: 0.7rem; margin-top: 5px; }
+    .led-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; margin-top: 4px; }
+    .led-grid label { font-size: 0.6rem; display: flex; flex-direction: column; align-items: center; background: #f0f0f0; border-radius: 4px; padding: 2px; }
+    input[type="number"], input[type="range"], select { width: 100%; }
+    .status { padding: 10px; font-size: 0.9rem; background: #fff; border-top: 1px solid #0001; }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <h1 style="margin:0; font-size:1.2rem;">LED Flow 8 - Bluetooth</h1>
+      <div id="pinMappingDisplay" class="chip" style="display:none;"></div>
+      <button id="connectBleBtn" class="primary">Se connecter à l'ESP32-H2</button>
+    </header>
+    <section class="toolbar">
+      <button id="addNodeBtn"> + Bloc</button>
+      <button id="applyBtn">Appliquer</button>
+      <button id="loadBtn">Charger Flash</button>
+      <button id="startBtn" class="good">Démarrer</button>
+      <button id="stopBtn" class="warn">Stop</button>
+      <button id="saveBtn">Sauver Flash</button>
+    </section>
+    <section id="workspace" class="workspace">
+      <svg id="links"></svg>
+      <div id="board"></div>
+    </section>
+    <p id="status" class="status">Déconnecté. Cliquez sur Connexion.</p>
+  </div>
+
+  <script>
+    const SERVICE_UUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
+    const CHAR_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
+    let bleChar = null;
+    const state = { nodes: [], startId: -1, selectedOut: null, nextId: 1, pins: [] };
+    let incomingBuffer = "";
+
+    const setStatus = (msg) => document.getElementById('status').innerText = msg;
+
+    async function connect() {
+      console.log("[BLE] Tentative de connexion...");
+      try {
+        const device = await navigator.bluetooth.requestDevice({ filters: [{namePrefix: 'LED-Flow'}], optionalServices: [SERVICE_UUID] });
+        console.log("[BLE] Périphérique trouvé:", device.name);
+        const server = await device.gatt.connect();
+        const service = await server.getPrimaryService(SERVICE_UUID);
+        bleChar = await service.getCharacteristic(CHAR_UUID);
+        
+        // Ecouter les notifications (visualisation temps réel)
+        await bleChar.startNotifications();
+        bleChar.addEventListener('characteristicvaluechanged', handleNotification);
+
+        setStatus("Connecté à " + device.name);
+        document.getElementById('connectBleBtn').innerText = "Connecté";
+        
+        // Demander l'état actuel (pins et nodes sauvés)
+        console.log("[BLE] Demande de la configuration actuelle...");
+        setTimeout(() => sendCmd({cmd: "get"}), 500);
+      } catch(e) { console.error("[BLE] Erreur connexion:", e); setStatus("Erreur: " + e.message); }
+    }
+
+    function handleNotification(event) {
+      const value = new TextDecoder().decode(event.target.value);
+      console.log("[BLE <<] Reçu:", value);
+
+      // Si c'est un message court de status
+      if (value.startsWith('{"active":') && !incomingBuffer) {
+        try {
+          const data = JSON.parse(value.replace(/\0/g, ''));
+          console.log("[BLE Status] Noeud actif:", data.active);
+          highlightActiveNode(data.active);
+        } catch(e) { console.error("[BLE Status] Erreur parse status:", e); }
+        return;
+      }
+
+      // Détection d'un nouveau début de configuration : on vide le buffer si nécessaire
+      if (value.startsWith('{"startId":')) {
+        console.log("[BLE] Nouveau début de JSON détecté. Réinitialisation du buffer.");
+        incomingBuffer = "";
+      }
+
+      // Sinon c'est un chunk du JSON complet
+      incomingBuffer += value;
+      console.log("[BLE Buffer] Accumulation... Taille actuelle:", incomingBuffer.length);
+
+      if (value.includes('\0') || value.endsWith('}]}')) {
+        console.log("[BLE Data] Fin de message détectée (\0). Parsing du JSON complet...");
+        try {
+          const cleanBuffer = incomingBuffer.replace(/\0/g, '');
+          console.log("[BLE Data] Contenu final à parser:", cleanBuffer);
+          const fullData = JSON.parse(cleanBuffer);
+          console.log("[BLE Data] JSON parsé avec succès:", fullData);
+          
+          state.nodes = fullData.nodes || [];
+          state.startId = fullData.startId || -1;
+          state.pins = fullData.pins || [];
+          // Recalculer le prochain ID disponible pour éviter les doublons
+          state.nextId = state.nodes.length > 0 ? Math.max(...state.nodes.map(n => n.id)) + 1 : 1;
+          
+          console.log("[UI] Mise à jour du plateau avec", state.nodes.length, "blocs");
+          render();
+          updatePinMapUI();
+          setStatus("Séquence chargée (" + state.nodes.length + " blocs)");
+        } catch(e) { 
+          console.error("[BLE Data] Échec du parsing JSON:", e); 
+          setStatus("Erreur de données Bluetooth");
+        }
+        incomingBuffer = "";
+      }
+    }
+
+    function updatePinMapUI() {
+      const display = document.getElementById('pinMappingDisplay');
+      if (state.pins.length) {
+        display.style.display = "block";
+        display.innerHTML = "Pins: " + state.pins.map((p, i) => `<b>L${i+1}</b>:${p}`).join(" | ");
+      }
+    }
+
+    function highlightActiveNode(id) {
+      document.querySelectorAll('.node').forEach(el => el.classList.remove('active'));
+      if (id !== -1) {
+        const activeEl = document.querySelector(`.node[data-id="${id}"]`);
+        if (activeEl) activeEl.classList.add('active');
+      }
+    }
+
+    async function sendCmd(obj) {
+      if(!bleChar) return setStatus("Non connecté !");
+      console.log("[BLE >>] Envoi commande:", obj);
+      const data = new TextEncoder().encode(JSON.stringify(obj) + "\0");
+      for(let i=0; i<data.length; i+=128) {
+        await bleChar.writeValueWithResponse(data.slice(i, i+128));
+      }
+      setStatus("Commande '" + (obj.cmd || "...") + "' envoyée");
+    }
+
+    function addNode() {
+      const node = { id: state.nextId++, x: 50, y: 50, leds: [0], target: 255, fadeMs: 500, holdMs: 100, next: -1 };
+      state.nodes.push(node);
+      if(state.startId === -1) state.startId = node.id;
+      render();
+    }
+
+    function render() {
+      console.log("[UI Render] Début du rendu des blocs...");
+      const board = document.getElementById('board');
+      board.innerHTML = "";
+      state.nodes.forEach(node => {
+        const el = document.createElement('div');
+        el.className = "node" + (state.startId === node.id ? " start" : "");
+        el.setAttribute('data-id', node.id);
+        el.style.left = node.x + "px"; el.style.top = node.y + "px";
+        
+        let ledCheckboxes = "";
+        for(let i=0; i<8; i++) {
+          const checked = node.leds.includes(i) ? "checked" : "";
+          const pinNum = state.pins[i] ? `(P${state.pins[i]})` : "";
+          ledCheckboxes += `<label title="Pin ${state.pins[i]}">L${i+1}${pinNum}<input type="checkbox" ${checked} onchange="toggleLed(${node.id}, ${i})"></label>`;
+        }
+
+        el.innerHTML = `
+          <div class="nodeHead"><span>Bloc ${node.id}</span><button onclick="removeNode(${node.id})">X</button></div>
+          <div class="ports">
+            <button class="port in" onclick="connectTo(${node.id})">IN</button>
+            <div style="display:flex; gap:4px;">
+              <button class="port out ${state.selectedOut===node.id?'armed':''}" onclick="selectOut(${node.id})">OUT</button>
+              ${node.next !== -1 ? `<button onclick="unlinkNode(${node.id})" style="background:var(--err); color:white; border-radius:5px; width:22px; height:25px; padding:0; border:none; cursor:pointer;" title="Supprimer le lien">×</button>` : ''}
+            </div>
+          </div>
+          <div class="field">LEDs <div class="led-grid">${ledCheckboxes}</div></div>
+          <label class="field">Luminosité <input type="range" min="0" max="255" value="${node.target}" onchange="updateNode(${node.id}, 'target', this.value)"></label>
+          <label class="field">Fade (ms) <input type="number" value="${node.fadeMs}" onchange="updateNode(${node.id}, 'fadeMs', this.value)"></label>
+          <label class="field">Pause (ms) <input type="number" value="${node.holdMs}" onchange="updateNode(${node.id}, 'holdMs', this.value)"></label>
+        `;
+        makeDraggable(el, node);
+        board.appendChild(el);
+      });
+      drawLinks();
+    }
+
+    function selectOut(id) { state.selectedOut = id; render(); }
+    function connectTo(id) {
+      if(state.selectedOut !== null && state.selectedOut !== id) {
+        const src = state.nodes.find(n => n.id === state.selectedOut);
+        src.next = id; state.selectedOut = null; render();
+      }
+    }
+    function removeNode(id) { state.nodes = state.nodes.filter(n => n.id !== id); render(); }
+    function unlinkNode(id) { const n = state.nodes.find(n=>n.id===id); if(n) n.next = -1; render(); }
+    function updateNode(id, key, val) { const n = state.nodes.find(n=>n.id===id); n[key] = parseInt(val); }
+
+    function toggleLed(nodeId, ledIdx) {
+      const node = state.nodes.find(n => n.id === nodeId);
+      if (node.leds.includes(ledIdx)) {
+        node.leds = node.leds.filter(l => l !== ledIdx);
+      } else {
+        node.leds.push(ledIdx);
+      }
+      render();
+    }
+
+    function drawLinks() {
+      const svg = document.getElementById('links');
+      svg.innerHTML = "";
+      state.nodes.forEach(n => {
+        if(n.next !== -1) {
+          const target = state.nodes.find(tn => tn.id === n.next);
+          if(!target) return;
+          const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+          path.setAttribute("d", `M ${n.x+180} ${n.y+45} L ${target.x+20} ${target.y+45}`);
+          path.setAttribute("class", "linkPath");
+          svg.appendChild(path);
+        }
+      });
+    }
+
+    function makeDraggable(el, node) {
+      const head = el.querySelector('.nodeHead');
+      head.onmousedown = (e) => {
+        // Empêcher le drag si on clique sur un bouton (ex: supprimer)
+        if (e.target.tagName === 'BUTTON') return;
+        const ox = e.clientX - el.offsetLeft, oy = e.clientY - el.offsetTop;
+        document.onmousemove = (e) => {
+          node.x = e.clientX - ox; node.y = e.clientY - oy;
+          el.style.left = node.x + "px"; el.style.top = node.y + "px";
+          drawLinks();
+        };
+        document.onmouseup = () => document.onmousemove = null;
+      };
+    }
+
+    document.getElementById('connectBleBtn').onclick = connect;
+    document.getElementById('addNodeBtn').onclick = addNode;
+    document.getElementById('applyBtn').onclick = () => sendCmd({cmd: "sequence", data: {nodes: state.nodes, startId: state.startId}});
+    document.getElementById('loadBtn').onclick = () => sendCmd({cmd: "load"});
+    document.getElementById('startBtn').onclick = () => sendCmd({cmd: "start"});
+    document.getElementById('stopBtn').onclick = () => sendCmd({cmd: "stop"});
+    document.getElementById('saveBtn').onclick = () => sendCmd({cmd: "save"});
+  </script>
+</body>
+</html>
