@@ -61,15 +61,19 @@
     </header>
     <section class="toolbar">
       <button id="addNodeBtn"> + Bloc</button>
-      <button id="applyBtn">Appliquer</button>
+      <button id="exportBtn">Exporter JSON</button>
+      <button id="importBtn">Importer JSON</button>
+      <input type="file" id="importInput" style="display:none" accept=".json">
       <button id="loadBtn">Charger Flash</button>
       <button id="startBtn" class="good">Démarrer</button>
       <button id="stopBtn" class="warn">Stop</button>
       <button id="saveBtn">Sauver Flash</button>
     </section>
-    <section id="workspace" class="workspace">
-      <svg id="links"></svg>
-      <div id="board"></div>
+    <section id="workspace" class="workspace" style="cursor: crosshair;">
+      <div id="viewport" style="transform-origin: 0 0; transition: transform 0.1s ease-out;">
+        <svg id="links"></svg>
+        <div id="board"></div>
+      </div>
     </section>
     <p id="status" class="status">Déconnecté. Cliquez sur Connexion.</p>
   </div>
@@ -78,7 +82,7 @@
     const SERVICE_UUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
     const CHAR_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
     let bleChar = null;
-    const state = { nodes: [], startId: -1, selectedOut: null, nextId: 1, pins: [] };
+    const state = { nodes: [], startId: -1, selectedOut: null, nextId: 1, pins: [], scale: 1.0 };
     let incomingBuffer = "";
 
     const setStatus = (msg) => document.getElementById('status').innerText = msg;
@@ -181,11 +185,17 @@
       setStatus("Commande '" + (obj.cmd || "...") + "' envoyée");
     }
 
+    function autoApply() {
+      if (!bleChar) return;
+      sendCmd({cmd: "sequence", data: {nodes: state.nodes, startId: state.startId}});
+    }
+
     function addNode() {
       const node = { id: state.nextId++, x: 50, y: 50, leds: [0], target: 255, fadeMs: 500, holdMs: 100, next: -1 };
       state.nodes.push(node);
       if(state.startId === -1) state.startId = node.id;
       render();
+      autoApply();
     }
 
     function render() {
@@ -229,12 +239,12 @@
     function connectTo(id) {
       if(state.selectedOut !== null && state.selectedOut !== id) {
         const src = state.nodes.find(n => n.id === state.selectedOut);
-        src.next = id; state.selectedOut = null; render();
+        src.next = id; state.selectedOut = null; render(); autoApply();
       }
     }
-    function removeNode(id) { state.nodes = state.nodes.filter(n => n.id !== id); render(); }
-    function unlinkNode(id) { const n = state.nodes.find(n=>n.id===id); if(n) n.next = -1; render(); }
-    function updateNode(id, key, val) { const n = state.nodes.find(n=>n.id===id); n[key] = parseInt(val); }
+    function removeNode(id) { state.nodes = state.nodes.filter(n => n.id !== id); render(); autoApply(); }
+    function unlinkNode(id) { const n = state.nodes.find(n=>n.id===id); if(n) n.next = -1; render(); autoApply(); }
+    function updateNode(id, key, val) { const n = state.nodes.find(n=>n.id===id); n[key] = parseInt(val); autoApply(); }
 
     function toggleLed(nodeId, ledIdx) {
       const node = state.nodes.find(n => n.id === nodeId);
@@ -244,6 +254,7 @@
         node.leds.push(ledIdx);
       }
       render();
+      autoApply();
     }
 
     function drawLinks() {
