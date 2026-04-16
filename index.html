@@ -69,7 +69,7 @@
       <button id="stopBtn" class="warn">Stop</button>
       <button id="saveBtn">Sauver Flash</button>
     </section>
-    <section id="workspace" class="workspace" style="cursor: crosshair;">
+    <section id="workspace" class="workspace">
       <div id="viewport" style="transform-origin: 0 0; transition: transform 0.1s ease-out;">
         <svg id="links"></svg>
         <div id="board"></div>
@@ -82,7 +82,7 @@
     const SERVICE_UUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
     const CHAR_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
     let bleChar = null;
-    const state = { nodes: [], startId: -1, selectedOut: null, nextId: 1, pins: [], scale: 1.0 };
+    const state = { nodes: [], startId: -1, activeNodeId: -1, selectedOut: null, nextId: 1, pins: [], scale: 1.0 };
     let incomingBuffer = "";
 
     const setStatus = (msg) => document.getElementById('status').innerText = msg;
@@ -113,10 +113,11 @@
       const value = new TextDecoder().decode(event.target.value);
       console.log("[BLE <<] Reçu:", value);
 
-      // Si c'est un message court de status
-      if (value.startsWith('{"active":') && !incomingBuffer) {
+      // Détection des messages de status (noeud actif)
+      if (value.includes('"active":')) {
         try {
-          const data = JSON.parse(value.replace(/\0/g, ''));
+          const cleanValue = value.replace(/\0/g, '');
+          const data = JSON.parse(cleanValue);
           console.log("[BLE Status] Noeud actif:", data.active);
           highlightActiveNode(data.active);
         } catch(e) { console.error("[BLE Status] Erreur parse status:", e); }
@@ -168,8 +169,9 @@
     }
 
     function highlightActiveNode(id) {
+      state.activeNodeId = id;
       document.querySelectorAll('.node').forEach(el => el.classList.remove('active'));
-      if (id !== -1) {
+      if (id !== undefined && id !== -1) {
         const activeEl = document.querySelector(`.node[data-id="${id}"]`);
         if (activeEl) activeEl.classList.add('active');
       }
@@ -195,7 +197,6 @@
       state.nodes.push(node);
       if(state.startId === -1) state.startId = node.id;
       render();
-      autoApply();
     }
 
     function render() {
@@ -204,7 +205,9 @@
       board.innerHTML = "";
       state.nodes.forEach(node => {
         const el = document.createElement('div');
-        el.className = "node" + (state.startId === node.id ? " start" : "");
+        const isStart = state.startId === node.id;
+        const isActive = state.activeNodeId === node.id;
+        el.className = `node ${isStart ? 'start' : ''} ${isActive ? 'active' : ''}`.trim();
         el.setAttribute('data-id', node.id);
         el.style.left = node.x + "px"; el.style.top = node.y + "px";
         
@@ -277,19 +280,59 @@
       head.onmousedown = (e) => {
         // Empêcher le drag si on clique sur un bouton (ex: supprimer)
         if (e.target.tagName === 'BUTTON') return;
-        const ox = e.clientX - el.offsetLeft, oy = e.clientY - el.offsetTop;
+        const ox = e.clientX / state.scale - node.x, oy = e.clientY / state.scale - node.y;
         document.onmousemove = (e) => {
-          node.x = e.clientX - ox; node.y = e.clientY - oy;
+          node.x = e.clientX / state.scale - ox; node.y = e.clientY / state.scale - oy;
           el.style.left = node.x + "px"; el.style.top = node.y + "px";
           drawLinks();
         };
-        document.onmouseup = () => document.onmousemove = null;
+        document.onmouseup = () => {
+          document.onmousemove = null;
+          autoApply();
+        };
       };
     }
 
+    // Gestion du Zoom avec la molette
+    document.getElementById('workspace').onwheel = (e) => {
+      e.preventDefault();
+      const delta = e.deltaY > 0 ? 0.9 : 1.1;
+      state.scale = Math.min(Math.max(0.1, state.scale * delta), 3);
+      document.getElementById('viewport').style.transform = `scale(${state.scale})`;
+    };
+
+    // Export JSON
+    document.getElementById('exportBtn').onclick = () => {
+      const data = JSON.stringify({nodes: state.nodes, startId: state.startId}, null, 2);
+      const blob = new Blob([data], {type: 'application/json'});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = 'ma_sequence.json'; a.click();
+      setStatus("Configuration exportée");
+    };
+
+    // Import JSON
+    document.getElementById('importBtn').onclick = () => document.getElementById('importInput').click();
+    document.getElementById('importInput').onchange = (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = (re) => {
+        try {
+          const imported = JSON.parse(re.target.result);
+          state.nodes = imported.nodes || [];
+          state.startId = imported.startId || -1;
+          state.nextId = state.nodes.length > 0 ? Math.max(...state.nodes.map(n => n.id)) + 1 : 1;
+          render();
+          autoApply();
+          setStatus("Séquence importée avec succès");
+        } catch(err) { alert("Erreur lors de la lecture du fichier JSON"); }
+      };
+      reader.readAsText(file);
+    };
+
     document.getElementById('connectBleBtn').onclick = connect;
     document.getElementById('addNodeBtn').onclick = addNode;
-    document.getElementById('applyBtn').onclick = () => sendCmd({cmd: "sequence", data: {nodes: state.nodes, startId: state.startId}});
     document.getElementById('loadBtn').onclick = () => sendCmd({cmd: "load"});
     document.getElementById('startBtn').onclick = () => sendCmd({cmd: "start"});
     document.getElementById('stopBtn').onclick = () => sendCmd({cmd: "stop"});
